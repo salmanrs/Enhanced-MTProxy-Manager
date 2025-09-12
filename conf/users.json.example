@@ -1,0 +1,14 @@
+{
+  "users": [
+    {
+      "name": "alice",
+      "secret_hex": "0123456789abcdef0123456789abcdef",
+      "mode": "ee",
+      "tls_domain": "www.google.com",
+      "ad_tag": "",
+      "expires_at": 0,
+      "quota_bytes": 2147483648,
+      "max_conns": 3
+    }
+  ]
+}
