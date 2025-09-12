@@ -1,0 +1,123 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+USERS=/etc/mtproxy/users.json
+ENV=/etc/mtproxy/mtproxy.env
+SERVICE=mtproxy
+
+need() { command -v "$1" >/dev/null 2>&1 || { echo "Missing: $1" >&2; exit 1; }; }
+need jq
+need curl
+need sed
+need xxd
+
+bytes() {
+  local v="${1,,}"
+  if [[ "$v" =~ ^[0-9]+$ ]]; then echo "$v"; return; fi
+  local n=$(echo "$v" | sed -E 's/[^0-9]//g')
+  if [[ "$v" == *kb ]]; then echo $((n*1024)); return; fi
+  if [[ "$v" == *mb ]]; then echo $((n*1024*1024)); return; fi
+  if [[ "$v" == *gb ]]; then echo $((n*1024*1024*1024)); return; fi
+  echo "$n"
+}
+
+reload() { systemctl kill -s HUP "$SERVICE" || systemctl restart "$SERVICE"; }
+ensure_users() { [[ -f "$USERS" ]] || echo '{"users":[]}' > "$USERS"; }
+
+add_user() {
+  local name="" secret="" mode="plain" tls="" ad="" quota="0" maxc="0" expire="0"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --name) name="$2"; shift 2;;
+      --secret) secret="$2"; shift 2;;
+      --mode) mode="$2"; shift 2;;
+      --tls-domain) tls="$2"; shift 2;;
+      --ad-tag) ad="$2"; shift 2;;
+      --quota) quota="$(bytes "$2")"; shift 2;;
+      --max-conns) maxc="$2"; shift 2;;
+      --expire)
+        if [[ "$2" =~ ^\+([0-9]+)d$ ]]; then
+          expire=$(( $(date +%s) + (${BASH_REMATCH[1]}*86400) ))
+        else expire="$2"; fi; shift 2;;
+      *) echo "Unknown: $1" >&2; exit 1;;
+    esac
+  done
+  [[ -n "$name" && -n "$secret" ]] || { echo "name/secret required" >&2; exit 1; }
+  ensure_users
+  tmp=$(mktemp)
+  jq --arg name "$name" '.users |= map(select(.name!=$name))' "$USERS" > "$tmp" && mv "$tmp" "$USERS"
+  jq --arg name "$name" --arg secret "$secret" --arg mode "$mode" --arg tls "$tls" --arg ad "$ad" \
+     --argjson quota "$quota" --argjson maxc "$maxc" --argjson exp "$expire" \
+     '.users += [{name:$name, secret_hex:$secret, mode:$mode, tls_domain:$tls, ad_tag:$ad, quota_bytes:$quota, max_conns:$maxc, expires_at:$exp}]' \
+     "$USERS" > "$tmp" && mv "$tmp" "$USERS"
+  reload
+  echo "User '$name' added."
+}
+
+del_user() {
+  local name="$1"; ensure_users; tmp=$(mktemp)
+  jq --arg name "$name" '.users |= map(select(.name!=$name))' "$USERS" > "$tmp" && mv "$tmp" "$USERS"
+  reload; echo "User '$name' removed."
+}
+
+set_field() {
+  local name="$1" field="$2" value="$3"; ensure_users; tmp=$(mktemp)
+  jq --arg name "$name" --arg field "$field" --argjson v "$value" \
+     '(.users[] | select(.name==$name) | .[$field]) |= $v' "$USERS" > "$tmp" && mv "$tmp" "$USERS"
+  reload
+}
+
+cmd_link() {
+  local name="" server="" port=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --name) name="$2"; shift 2;;
+      --server) server="$2"; shift 2;;
+      --port) port="$2"; shift 2;;
+      *) echo "Unknown arg $1"; exit 1;;
+    esac
+  done
+  [[ -n "$name" && -n "$server" && -n "$port" ]] || { echo "need --name/--server/--port"; exit 1; }
+  read -r mode secret tls < <(jq -r --arg name "$name" '.users[]|select(.name==$name)|.mode+" "+.secret_hex+" "+(.tls_domain//"")' "$USERS")
+  [[ -n "$mode" ]] || { echo "user not found"; exit 1; }
+  if [[ "$mode" == "ee" && -n "$tls" ]]; then
+    dom_hex=$(printf %s "$tls" | xxd -p -c 256)
+    echo "tg://proxy?server=$server&port=$port&secret=ee${secret}${dom_hex}"
+  elif [[ "$mode" == "dd" ]]; then
+    echo "tg://proxy?server=$server&port=$port&secret=dd${secret}"
+  else
+    echo "tg://proxy?server=$server&port=$port&secret=${secret}"
+  fi
+}
+
+cmd_stats() {
+  local port=$(grep -E '^STATS_PORT=' "$ENV" | cut -d= -f2); [[ -z "$port" ]] && port=8888
+  curl -s "http://127.0.0.1:${port}/stats" || echo "stats endpoint not reachable"
+}
+
+usage() {
+  cat <<EOF
+Usage: mtcctl <command> [options]
+Commands:
+  add-user --name NAME --secret HEX16 [--mode plain|dd|ee] [--tls-domain DOM] [--ad-tag HEX32] [--quota 2gb] [--max-conns N] [--expire +30d|0|UNIX_TS]
+  del-user NAME
+  quota NAME BYTES|{kb|mb|gb}
+  expire NAME +Nd|0|UNIX_TS
+  maxconns NAME N
+  link --name NAME --server IP --port PORT
+  stats
+  help
+EOF
+}
+
+case "${1:-}" in
+  add-user) shift; add_user "$@";;
+  del-user) shift; del_user "$@";;
+  quota)    shift; set_field "$1" "quota_bytes" "$(bytes "$2")";;
+  expire)   shift; if [[ "$2" =~ ^\+([0-9]+)d$ ]]; then set_field "$1" "expires_at" "$(( $(date +%s) + (${BASH_REMATCH[1]}*86400) ))"; else set_field "$1" "expires_at" "$2"; fi;;
+  maxconns) shift; set_field "$1" "max_conns" "$2";;
+  link)     shift; cmd_link "$@";;
+  stats)    shift; cmd_stats;;
+  help|"")  usage;;
+  *)        usage; exit 1;;
+esac
