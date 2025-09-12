@@ -1,0 +1,19 @@
+[Unit]
+Description=MTProxy (C) with external manager
+After=network.target
+
+[Service]
+Type=simple
+User=nobody
+Group=nogroup
+EnvironmentFile=/etc/mtproxy/mtproxy.env
+WorkingDirectory=/opt/mtproxy
+ExecStart=/opt/mtproxy/mtproto-proxy \
+  -u nobody -p ${STATS_PORT} -H ${PORT} \
+  --aes-pwd /opt/mtproxy/proxy-secret /opt/mtproxy/proxy-multi.conf \
+  ${AD_TAG:+-P ${AD_TAG}}
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
