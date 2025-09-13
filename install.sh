@@ -8,8 +8,6 @@ USERS_JSON="/etc/mtproxy/users.json"
 ENV_FILE="/etc/mtproxy/mtproxy.env"
 QUOTA_DB="/var/lib/mtproxy/quota.db"
 
-# Will build MTProxy C from upstream.
-# Later you can replace these with your own repository/branch.
 UPSTREAM_REPO="https://github.com/TelegramMessenger/MTProxy"
 UPSTREAM_BRANCH="master"
 
@@ -46,6 +44,10 @@ chmod 755 /etc/mtproxy /var/lib/mtproxy
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 git clone --depth=1 -b "$UPSTREAM_BRANCH" "$UPSTREAM_REPO" "$TMP/MTProxy"
+
+# Patch Makefile to avoid multiple definition errors
+sed -i 's#objs/lib/libkbdb\.a##g' "$TMP/MTProxy/Makefile"
+
 make -C "$TMP/MTProxy" -j"$(nproc)"
 
 install -m 0755 "$TMP/MTProxy/objs/bin/mtproto-proxy" "$INSTALL_DIR/mtproto-proxy"
